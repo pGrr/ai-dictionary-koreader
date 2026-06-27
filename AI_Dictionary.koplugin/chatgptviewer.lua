@@ -74,6 +74,7 @@ local ChatGPTViewer = InputContainer:extend {
 
   benedict = nil,
   stream_cancel = nil,
+  lang_code = nil,
 }
 
 function ChatGPTViewer:init()
@@ -490,10 +491,18 @@ function ChatGPTViewer:handleTextSelection(text, hold_duration, start_idx, end_i
   end
   if Device:hasClipboard() then
     Device.input.setClipboardText(text)
-    UIManager:show(Notification:new {
-      text = start_idx == end_idx and _("Word copied to clipboard.")
-          or _("Selection copied to clipboard."),
-    })
+    local bl_ok, book_lang = pcall(require, "book_language")
+    local msg
+    if bl_ok and book_lang then
+      msg = start_idx == end_idx
+          and book_lang.get_ui_string(self.lang_code, "word_copied")
+          or book_lang.get_ui_string(self.lang_code, "selection_copied")
+    else
+      msg = start_idx == end_idx
+          and _("Word copied to clipboard.")
+          or _("Selection copied to clipboard.")
+    end
+    UIManager:show(Notification:new { text = msg })
   end
 end
 
@@ -513,6 +522,7 @@ function ChatGPTViewer:update(new_text, new_header_text, options)
     stream_cancel = self.stream_cancel,
     header_face = self.header_face,
     header_spacing = self.header_spacing,
+    lang_code = self.lang_code,
   }
   if options.scroll_to_bottom ~= false then
     updated_viewer.scroll_text_w:scrollToBottom()

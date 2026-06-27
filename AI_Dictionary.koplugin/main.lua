@@ -25,6 +25,15 @@ local TextViewer = require("ui/widget/textviewer")
 
 local save_lookup_entry = require("lookups_log")
 
+local _bl_load_error = nil
+local book_language_ok, book_language = pcall(require, "book_language")
+if not book_language_ok then
+    _bl_load_error = tostring(book_language)
+    book_language = nil
+end
+
+local T_ = book_language and book_language.translate_ui or _
+
 local MAX_HL = 2000
 local MAX_TITLE = 100
 local STREAM_UPDATE_TOKEN_INTERVAL = 10
@@ -33,10 +42,45 @@ local PTF_HEADER = "\u{FFF1}"
 local PTF_BOLD_START = "\u{FFF2}"
 local PTF_BOLD_END = "\u{FFF3}"
 
-local DICTIONARY_SECTION_LABELS = { "Definition", "Example", "Synonyms", "Paraphrase", "Etymology" }
+local DEFAULT_DICTIONARY_SECTION_LABELS = { "Definition", "Example", "Synonyms", "Paraphrase", "Etymology" }
 
-local OFFLINE_WAIT_MESSAGE = "You are offline. AI lookup requires an active internet connection."
-local ONLINE_WAIT_MESSAGE = "Getting the answer..."
+-- Safe wrappers: if book_language module failed to load, fall back to original behavior
+local function bl_detect(ui)
+    return book_language and book_language.detect(ui) or nil
+end
+local function bl_get_name(code)
+    return book_language and book_language.get_name(code) or "English"
+end
+local function bl_get_dictionary_labels(code)
+    return book_language and book_language.get_dictionary_labels(code) or DEFAULT_DICTIONARY_SECTION_LABELS
+end
+local function bl_get_ui_string(code, key)
+    if book_language then return book_language.get_ui_string(code, key) end
+    local defaults = {
+        offline_wait = "You are offline. AI lookup requires an active internet connection.",
+        online_wait = "Getting the answer...",
+        generating_report = "Generating report...",
+        word_copied = "Word copied to clipboard.",
+        selection_copied = "Selection copied to clipboard.",
+        stream_stalled = "Streaming stalled; retrying without streaming...",
+        error_querying = "Error querying AI: ",
+    }
+    return defaults[key] or ""
+end
+local function bl_get_pronunciation_language(code)
+    return book_language and book_language.get_pronunciation_language(code) or "American (US) English"
+end
+local function bl_get_ai_language_instruction(code)
+    return book_language and book_language.get_ai_language_instruction(code) or ""
+end
+local function bl_escape_pattern(s)
+    if book_language then return book_language.escape_pattern(s) end
+    return (s:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1"))
+end
+local function bl_escape_replacement(s)
+    if book_language then return book_language.escape_replacement(s) end
+    return (s:gsub("%%", "%%%%"))
+end
 
 local CORE_CONFIGURATION_KEYS = { "api_key", "provider", "model" }
 local CORE_CONFIGURATION_KEY_SET = {
@@ -76,16 +120,25 @@ end
 local function format_dictionary_output(selection, answer)
     local output = answer or ""
     local header = nil
-    if selection and selection ~= "" then
-        header = PTF_HEADER .. ptf_bold(selection)
-    end
-    for _, label in ipairs(DICTIONARY_SECTION_LABELS) do
-        output = output:gsub("(^%s*)" .. label .. "%s*:", function(prefix)
-            return prefix .. ptf_bold(label .. ":")
-        end)
-        output = output:gsub("([\r\n]%s*)" .. label .. "%s*:", function(prefix)
-            return prefix .. ptf_bold(label .. ":")
-        end)
+    local labels = lastDictionarySectionLabels or DEFAULT_DICTIONARY_SECTION_LABELS
+    local ok, err = pcall(function()
+        if selection and selection ~= "" then
+            header = PTF_HEADER .. ptf_bold(selection)
+        end
+        for _, label in ipairs(labels) do
+            local safe_label = bl_escape_pattern(label)
+            output = output:gsub("(^%s*)" .. safe_label .. "%s*:", function(prefix)
+                return prefix .. ptf_bold(label .. ":")
+            end)
+            output = output:gsub("([\r\n]%s*)" .. safe_label .. "%s*:", function(prefix)
+                return prefix .. ptf_bold(label .. ":")
+            end)
+        end
+    end)
+    if not ok then
+        -- Fallback: return plain text without PTF formatting
+        print("AI Dictionary: format_dictionary_output error: " .. tostring(err))
+        return nil, answer or ""
     end
     return header, PTF_HEADER .. output
 end
@@ -233,11 +286,11 @@ end
 
 local function display_configuration_value(key, value)
   if value == nil then
-    return "not set"
+    return T_("not set")
   end
   if key == "api_key" and type(value) == "string" and value ~= "" then
     if #value <= 10 then
-      return "set"
+      return T_("set")
     end
     return value:sub(1, 6) .. "..." .. value:sub(-4)
   end
@@ -265,11 +318,13 @@ end
 
 local function find_dictionary_section_boundary(text, after_index)
   local latest_start = nil
+  local labels = lastDictionarySectionLabels or DEFAULT_DICTIONARY_SECTION_LABELS
 
-  for _, label in ipairs(DICTIONARY_SECTION_LABELS) do
+  for _, label in ipairs(labels) do
+    local safe_label = bl_escape_pattern(label)
     local search_from = math.max((after_index or 0) + 1, 1)
     while true do
-      local start_index, end_index = text:find(label .. "%s*:", search_from)
+      local start_index, end_index = text:find(safe_label .. "%s*:", search_from)
       if not start_index then
         break
       end
@@ -289,14 +344,22 @@ local function find_dictionary_section_boundary(text, after_index)
   return latest_start
 end
 
-local function render_answer(chatgpt_viewer, is_dictionary, title_case_selection, preface_with_selection, answer)
+local function render_answer(chatgpt_viewer, is_dictionary, title_case_selection, preface_with_selection, answer, options)
     if is_dictionary then
-      local header_text, body_text = format_dictionary_output(title_case_selection, answer)
-      return chatgpt_viewer:update(body_text, header_text)
+      local ok, header_text, body_text = pcall(format_dictionary_output, title_case_selection, answer)
+      if ok and body_text then
+        return chatgpt_viewer:update(body_text, header_text, options)
+      else
+        -- Fallback: show raw answer without dictionary formatting
+        if not ok then
+          print("AI Dictionary: render_answer error: " .. tostring(header_text))
+        end
+        return chatgpt_viewer:update(answer or "", nil, options)
+      end
     elseif preface_with_selection then
-      return chatgpt_viewer:update(string.format("%s %s", title_case_selection, answer))
+      return chatgpt_viewer:update(string.format("%s %s", title_case_selection, answer), nil, options)
     else
-      return chatgpt_viewer:update(string.format("%s %s", "", answer))
+      return chatgpt_viewer:update(string.format("%s %s", "", answer), nil, options)
     end
 end
 
@@ -311,14 +374,15 @@ local function stream_answer(chatgpt_viewer, message_history, is_dictionary, tit
     return tostring(err):match("^wantread") ~= nil or tostring(err):match("^timeout") ~= nil
   end
 
-  local function update_viewer(answer)
+  local function update_viewer(answer, options)
     last_rendered_answer = answer
     current_viewer = render_answer(
       current_viewer,
       is_dictionary,
       title_case_selection,
       preface_with_selection,
-      answer
+      answer,
+      options
     )
     current_viewer.stream_cancel = cancel_stream
     repaint_now()
@@ -328,10 +392,11 @@ local function stream_answer(chatgpt_viewer, message_history, is_dictionary, tit
     request_parameters = request_parameters,
     on_delta = function(_, accumulated, token_count)
       if is_dictionary then
-        local boundary = find_dictionary_section_boundary(accumulated, last_rendered_dictionary_boundary)
-        if boundary then
+        local bok, boundary = pcall(find_dictionary_section_boundary, accumulated, last_rendered_dictionary_boundary)
+        if bok and boundary then
           last_rendered_dictionary_boundary = boundary
-          update_viewer(accumulated:sub(1, boundary - 1):gsub("%s+$", ""))
+          local slice = accumulated:sub(1, boundary - 1):gsub("%s+$", "")
+          update_viewer(slice)
         end
       elseif token_count - last_rendered_token_count >= STREAM_UPDATE_TOKEN_INTERVAL then
         last_rendered_token_count = token_count
@@ -339,23 +404,25 @@ local function stream_answer(chatgpt_viewer, message_history, is_dictionary, tit
       end
     end,
     on_done = function(accumulated)
-      if accumulated ~= last_rendered_answer then
-        update_viewer(accumulated)
-      end
+      -- Always re-render with scroll at top for the final view
+      update_viewer(accumulated, { scroll_to_bottom = false })
       if on_success then
-        on_success(accumulated)
+        local sok, serr = pcall(on_success, accumulated)
+        if not sok then
+          print("AI Dictionary: on_success callback error: " .. tostring(serr))
+        end
       end
     end,
     on_error = function(err)
       if is_stream_transport_error(err) then
-        update_viewer("Streaming stalled; retrying without streaming...")
+        update_viewer(bl_get_ui_string(lastBookLanguage, "stream_stalled"))
         local answer = queryChatGPT(message_history)
         update_viewer(answer)
         if on_success and answer and answer ~= "" and not tostring(answer):match("^Error querying AI:") then
           on_success(answer)
         end
       else
-        update_viewer("Error querying AI: " .. tostring(err))
+        update_viewer(bl_get_ui_string(lastBookLanguage, "error_querying") .. tostring(err))
       end
     end,
   })
@@ -405,6 +472,8 @@ local lastRequestParameters = nil
 local lastIsReport = false
 local waitMessage = ""
 local lastIsDictionary = false
+local lastBookLanguage = nil
+local lastDictionarySectionLabels = DEFAULT_DICTIONARY_SECTION_LABELS
 
 function AskGPT:Query(_reader_highlight_instance, dialog_title, preface_with_selection, query, request_parameters)
   local ui = self.ui
@@ -416,8 +485,11 @@ function AskGPT:Query(_reader_highlight_instance, dialog_title, preface_with_sel
   end
   author = (author and author ~= "" and author) or "Unknown Author"
 
+  local lang_code = bl_detect(ui)
+  lastBookLanguage = lang_code
+  lastDictionarySectionLabels = bl_get_dictionary_labels(lang_code)
+
   local highlightedText = tostring(_reader_highlight_instance.selected_text.text) or "Nothing highlighted"
-  --showLoadingDialog()
 
   local chapterClause = ""
   local triedChapterName = self:getCurrentChapterName()
@@ -438,33 +510,46 @@ function AskGPT:Query(_reader_highlight_instance, dialog_title, preface_with_sel
 
   local online = NetworkMgr:isOnline()
 
+  local waitMessage
   if not online then
-    waitMessage = OFFLINE_WAIT_MESSAGE
+    waitMessage = bl_get_ui_string(lang_code, "offline_wait")
   else
-    waitMessage = ONLINE_WAIT_MESSAGE
+    waitMessage = bl_get_ui_string(lang_code, "online_wait")
   end
 
+  local display_title = T_(dialog_title)
+
   local chatgpt_viewer = ChatGPTViewer:new {
-    title = dialog_title,
-    text = string.format(waitMessage),
+    title = display_title,
+    text = waitMessage,
     onAskQuestion = nil,
-    benedict = self
+    benedict = self,
+    lang_code = lang_code,
   }
 
   ui.highlight:onClose()
   UIManager:show(chatgpt_viewer)
 
+  local dictionary_labels = lastDictionarySectionLabels
   local replacements = {
     ["{title}"] = safeTitle,
     ["{author}"] = safeAuthor,
     ["{chapter}"] = safeChapter,
     ["{selection}"] = safeHighlightedText,
     ["{context}"] = safeSelectionInContext,
+    ["{language_name}"] = bl_get_name(lang_code),
+    ["{language_instruction}"] = bl_get_ai_language_instruction(lang_code),
+    ["{pronunciation_language}"] = bl_get_pronunciation_language(lang_code),
+    ["{definition_label}"] = dictionary_labels[1],
+    ["{example_label}"] = dictionary_labels[2],
+    ["{synonyms_label}"] = dictionary_labels[3],
+    ["{paraphrase_label}"] = dictionary_labels[4],
+    ["{etymology_label}"] = dictionary_labels[5],
   }
 
   local resolvedQuery = query
   for key, value in pairs(replacements) do
-    resolvedQuery = resolvedQuery:gsub(key, value)
+    resolvedQuery = resolvedQuery:gsub(key, bl_escape_replacement(value))
   end
 
   lastQuery = resolvedQuery
@@ -495,10 +580,11 @@ end
 function AskGPT:Regenerate(chatgpt_viewer)
   local online = NetworkMgr:isOnline()
 
+  local waitMessage
   if not online then
-    waitMessage = OFFLINE_WAIT_MESSAGE
+    waitMessage = bl_get_ui_string(lastBookLanguage, "offline_wait")
   else
-    waitMessage = ONLINE_WAIT_MESSAGE
+    waitMessage = bl_get_ui_string(lastBookLanguage, "online_wait")
   end
 
   local updatedViewer = chatgpt_viewer:update(waitMessage)
@@ -529,11 +615,11 @@ function AskGPT:showLookupsReportRequestDialog(selected_index)
   local report_dialog
 
   report_dialog = ButtonDialog:new {
-    title = "AI Dictionary Lookups Report",
+    title = T_("AI Dictionary Lookups Report"),
     buttons = {
       {
         {
-          text = "Timeframe: " .. timeframe.label,
+          text = T_("Timeframe") .. ": " .. _(timeframe.label),
           callback = function()
             UIManager:close(report_dialog)
             self:showLookupsReportTimeframeDialog(selected_index)
@@ -542,7 +628,7 @@ function AskGPT:showLookupsReportRequestDialog(selected_index)
       },
       {
         {
-          text = "Generate Report",
+          text = T_("Generate Report"),
           callback = function()
             UIManager:close(report_dialog)
             self:generateLookupsReport(timeframe)
@@ -572,7 +658,7 @@ function AskGPT:showLookupsReportTimeframeDialog(selected_index)
   end
 
   selector_dialog = ButtonDialog:new {
-    title = "Timeframe",
+    title = T_("Timeframe"),
     buttons = buttons,
   }
 
@@ -582,21 +668,26 @@ end
 function AskGPT:generateLookupsReport(timeframe)
   local entries = LookupsReport.load_entries(self.path, timeframe)
   if #entries == 0 then
-    show_message("No lookups found for " .. timeframe.label .. ".")
+    show_message(T_("No lookups found for ") .. _(timeframe.label) .. ".")
     return
   end
 
+  local lang_code = bl_detect(self.ui)
+  lastBookLanguage = lang_code
+
   local report_viewer = ChatGPTViewer:new {
-    title = "AI Dictionary Lookups Report",
-    text = "Generating report...",
+    title = T_("AI Dictionary Lookups Report"),
+    text = bl_get_ui_string(lang_code, "generating_report"),
     onAskQuestion = nil,
-    benedict = self
+    benedict = self,
+    lang_code = lang_code,
   }
 
   UIManager:show(report_viewer)
 
   UIManager:scheduleIn(0.01, function()
     local report_prompt = LookupsReport.build_prompt(entries, timeframe)
+    report_prompt = report_prompt .. bl_get_ai_language_instruction(lang_code)
     lastQuery = report_prompt
     lastPrefaceWithSelection = false
     lastTitleCaseSelection = ""
@@ -620,14 +711,14 @@ function AskGPT:saveConfiguration(configuration)
   local configuration_path = get_configuration_path(self)
   local file, err = io.open(configuration_path, "w")
   if not file then
-    show_message("Could not save configuration.lua:\n" .. tostring(err))
+    show_message(T_("Could not save configuration.lua:") .. "\n" .. tostring(err))
     return false
   end
 
   file:write(serialize_configuration(configuration))
   file:close()
   package.loaded["configuration"] = nil
-  show_message("AI Dictionary settings saved.")
+  show_message(T_("AI Dictionary settings saved."))
   return true
 end
 
@@ -646,10 +737,10 @@ function AskGPT:editConfigurationValue(key, parse_as_literal)
 
   local input_dialog
   input_dialog = InputDialog:new {
-    title = "Edit " .. label,
+    title = T_("Edit") .. " " .. label,
     input = input_value,
     input_type = current_type == "number" and "number" or "text",
-    description = (parse_as_literal or current_type == "table") and "Enter a Lua literal: string, number, boolean, or table." or nil,
+    description = (parse_as_literal or current_type == "table") and T_("Enter a Lua literal: string, number, boolean, or table.") or nil,
     buttons = {
       {
         {
@@ -668,7 +759,7 @@ function AskGPT:editConfigurationValue(key, parse_as_literal)
             if current_type == "number" then
               new_value = tonumber(raw_value)
               if new_value == nil then
-                show_message("Please enter a valid number.")
+                show_message(T_("Please enter a valid number."))
                 return
               end
             elseif current_type == "boolean" then
@@ -676,7 +767,7 @@ function AskGPT:editConfigurationValue(key, parse_as_literal)
             elseif parse_as_literal or current_type == "table" then
               local parsed_value, parse_error = parse_lua_literal(raw_value)
               if parsed_value == nil then
-                show_message("Please enter a valid non-nil Lua value.\n" .. tostring(parse_error or ""))
+                show_message(T_("Please enter a valid non-nil Lua value.") .. "\n" .. tostring(parse_error or ""))
                 return
               end
               new_value = parsed_value
@@ -699,10 +790,10 @@ end
 function AskGPT:addConfigurationValue()
   local key_dialog
   key_dialog = InputDialog:new {
-    title = "Add setting",
+    title = T_("Add setting"),
     input = "",
     input_type = "text",
-    description = "Enter a Lua identifier, for example: additional_parameters",
+    description = T_("Enter a Lua identifier, for example: additional_parameters"),
     buttons = {
       {
         {
@@ -717,13 +808,13 @@ function AskGPT:addConfigurationValue()
           callback = function()
             local key = key_dialog:getInputText()
             if not is_lua_identifier(key) then
-              show_message("Setting names must be Lua identifiers.")
+              show_message(T_("Setting names must be Lua identifiers."))
               return
             end
 
             local configuration = load_configuration()
             if configuration[key] ~= nil then
-              show_message("That setting already exists.")
+              show_message(T_("That setting already exists."))
               return
             end
 
@@ -742,10 +833,10 @@ end
 function AskGPT:editNewConfigurationLiteral(key)
   local value_dialog
   value_dialog = InputDialog:new {
-    title = "Set " .. key,
+    title = T_("Set") .. " " .. key,
     input = "\"\"",
     input_type = "text",
-    description = "Enter a Lua literal: string, number, boolean, or table.",
+    description = T_("Enter a Lua literal: string, number, boolean, or table."),
     buttons = {
       {
         {
@@ -760,7 +851,7 @@ function AskGPT:editNewConfigurationLiteral(key)
           callback = function()
             local value, parse_error = parse_lua_literal(value_dialog:getInputText())
             if value == nil then
-              show_message("Please enter a valid non-nil Lua value.\n" .. tostring(parse_error or ""))
+              show_message(T_("Please enter a valid non-nil Lua value.") .. "\n" .. tostring(parse_error or ""))
               return
             end
 
@@ -845,7 +936,7 @@ function AskGPT:getSettingsMenuItems()
 
   if #delete_items > 0 then
     table.insert(items, {
-      text = "Delete custom setting",
+      text = T_("Delete custom setting"),
       sub_item_table = delete_items,
     })
   end
@@ -855,14 +946,14 @@ end
 
 function AskGPT:addToMainMenu(menu_items)
   menu_items.ai_dictionary_lookups_report = {
-    text = "AI Dictionary Lookups Report",
+    text = T_("AI Dictionary Lookups Report"),
     sorting_hint = "search",
     callback = function()
       self:showLookupsReportRequestDialog()
     end,
   }
   menu_items.ai_dictionary_settings = {
-    text = "AI Dictionary settings",
+    text = T_("AI Dictionary settings"),
     sorting_hint = "more_tools",
     sub_item_table_func = function()
       return self:getSettingsMenuItems()
@@ -877,9 +968,19 @@ function AskGPT:init()
   self.updater = Updater:new(self)
   self.updater:checkOnStartup()
 
+  -- Show diagnostic if book_language failed to load
+  if _bl_load_error then
+    UIManager:scheduleIn(3, function()
+      UIManager:show(InfoMessage:new {
+        text = "AI Dictionary: book_language.lua error:\n" .. _bl_load_error,
+        timeout = 15,
+      })
+    end)
+  end
+
   self.ui.highlight:addToHighlightDialog("aidictionary_1", function(_reader_highlight_instance)
     return {
-      text = _("AI Explain"),
+      text = T_("AI Explain"),
       enabled = Device:hasClipboard(),
       callback = function()
           self:Query(_reader_highlight_instance, "AI Explain", false,
@@ -887,7 +988,7 @@ function AskGPT:init()
             "This is the context where it appears: '...{context}...'\n" ..
             "Use web search economically to identify or verify the book, character, place, term, reference, or allusion if that helps. " ..
             "Explain it in the context/lore of the book, and help me understand it better (like Amazon Kindle's X-Ray, but much more concise). " ..
-            "No spoilers if it's fiction. Plain text. Keep your explanation concise and brief (under 90 words), and ask no questions at the end.",
+            "No spoilers if it's fiction. Plain text. Keep your explanation concise and brief (under 90 words), and ask no questions at the end.{language_instruction}",
             AI_EXPLAIN_WEB_SEARCH_PARAMETERS)
       end,
     }
@@ -895,36 +996,36 @@ function AskGPT:init()
 
   self.ui.highlight:addToHighlightDialog("aidictionary_2", function(_reader_highlight_instance)
     return {
-      text = _("AI English Simplify"),
+      text = T_("AI Simplify"),
       enabled = Device:hasClipboard(),
       callback = function()
-          self:Query(_reader_highlight_instance, "AI English Explain", false,
-            "I'm an advanced learner of English. I'm reading '{title}' by '{author}'{chapter}. This is my highlighted text: \n'{selection}'\n" ..
+          self:Query(_reader_highlight_instance, "AI Simplify", false,
+            "I'm reading '{title}' by '{author}'{chapter}. This is my highlighted text: \n'{selection}'\n" ..
             "This is the context where it appears: '...{context}...'\n" ..
-            "Explain its meaning in simple understandable English. Keep your explanation brief and under 30 words.")
+            "Explain its meaning in simple, understandable {language_name}. Keep your explanation brief and under 30 words.{language_instruction}")
       end,
     }
   end)
 
   self.ui.highlight:addToHighlightDialog("aidictionary_3", function(_reader_highlight_instance)
     return {
-      text = _("AI Dictionary"),
+      text = T_("AI Dictionary"),
       enabled = Device:hasClipboard(),
       callback = function()
           self:Query(_reader_highlight_instance, "AI Dictionary", true,
-            "I'm an advanced learner of English. I'm reading '{title}' by '{author}'{chapter}. My selected text: \n'{selection}'\n"..
+            "I'm reading '{title}' by '{author}'{chapter}. My selected text: \n'{selection}'\n"..
             "This is the context where it appears: '...{context}...'\n" ..
             "ONLY for the selected text, give me an informative, context-aware, dictionary-style answer strictly in this format ONCE and add nothing more:\n" ..
             "(v./n./idiom/etc.) " ..
-            "/[ACCURATE and CORRECT American (US) English pronunciation in the form of IPA]/ " ..
-            "([English alphabet pronunciation help American US English])\n" ..
+            "/[ACCURATE and CORRECT {pronunciation_language} pronunciation in the form of IPA]/ " ..
+            "([alphabet pronunciation help {pronunciation_language}])\n" ..
             "[Up to 3 feel and register tags separated by '•', e.g. slang, conversational, blunt, historical, formal, neutral, offensive (all lower-case)]\n\n" ..
-            "Definition: [Plain and understandable definition in under 20 words]\n\n" ..
-            "Example: [A natural sentence that uses the word(s) in the same meaning and register, but in a different situation]\n\n" ..
-            "Synonyms: [Up to 3 synonyms, if any exists. If there are no synonyms skip this section]\n\n" ..
-            "Paraphrase: [A short example sentence paraphrasing the selection using simpler words, with the same meaning and register]\n\n" ..
-            "Etymology: [Concise and helpful etymology with a focus on the different parts that make up the word or interesting history in case of idioms, in under 20 words]"..
-            "(Pay close attention to the number of line breaks in the formatting of the response)")
+            "{definition_label}: [Plain and understandable definition in under 20 words]\n\n" ..
+            "{example_label}: [A natural sentence that uses the word(s) in the same meaning and register, but in a different situation]\n\n" ..
+            "{synonyms_label}: [Up to 3 synonyms, if any exists. If there are no synonyms skip this section]\n\n" ..
+            "{paraphrase_label}: [A short example sentence paraphrasing the selection using simpler words, with the same meaning and register]\n\n" ..
+            "{etymology_label}: [Concise and helpful etymology with a focus on the different parts that make up the word or interesting history in case of idioms, in under 20 words]" ..
+            "(Pay close attention to the number of line breaks in the formatting of the response){language_instruction}")
       end,
     }
   end)

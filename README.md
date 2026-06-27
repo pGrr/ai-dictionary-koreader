@@ -5,7 +5,7 @@ AI Dictionary is a dictionary/explanation plugin for KOReader that can have a tr
 2. The built-in dictionaries of ebook readers generally don't support looking up the definition of multi-part phrases and idioms.
 3. They can't give you the definition in the context of the book that you are reading, and might—understandably—lack the definiton for words which only make sense in the context of a book, e.g. fictional terms in a novel.
 
-AI Dictionary gives you the meaning of your selected text **in the context** of its surrounding words, and also **in the context of the book you are reading**. You can ask for the definition of any number of words together, ask it to explain text in the context of the book, or to turn the selected text into more simplified English. All of that is available at the press of a button with no need to type anything. All the back-and-forth with the AI is done in the background, for a most seamless reading/learning experience.
+AI Dictionary gives you the meaning of your selected text **in the context** of its surrounding words, and also **in the context of the book you are reading**. You can ask for the definition of any number of words together, ask it to explain text in the context of the book, or to simplify the selected text into easier language. The plugin **automatically detects the language** of the book you are reading and adapts both the AI responses and the interface messages accordingly. All of that is available at the press of a button with no need to type anything. All the back-and-forth with the AI is done in the background, for a most seamless reading/learning experience.
 
 ![Demo](demo.gif)
 
@@ -29,13 +29,26 @@ return CONFIGURATION
 ```
 5. Copy the folder named `AI_Dictionary.koplugin` into the `koreader/plugins` directory on your device.
 6. You'll most probably want to disable the automatic launch of KOReader's default dictionary functionality on single-word selection. To do that, open KOReader's top menu (tap on the top part of the screen), go to `Settings` (the gear icon), select `Long-press on text` and disable `Dictionary on single word selection`.
-7. You are all set! Now simply select some word(s)/text, and use one of the options the plugins gives you ("AI Dictionary", "AI Explain", "AI English Simplify") to get answers.
+7. You are all set! Now simply select some word(s)/text, and use one of the options the plugin gives you ("AI Dictionary", "AI Explain", "AI Simplify") to get answers. The plugin automatically detects the language of the book and responds accordingly.
+
+## Language Support
+
+The plugin automatically detects the language of the book you are reading (from the book's metadata) and adapts:
+- **AI responses**: All explanations, definitions, and dictionary entries are generated in the book's language.
+- **UI messages**: Status messages (e.g. loading indicators, clipboard notifications) are shown in the book's language, with built-in translations for 12 languages (English, Italian, French, German, Spanish, Portuguese, Dutch, Russian, Polish, Japanese, Chinese, Korean).
+- **Dictionary labels**: Section labels like "Definition", "Example", "Synonyms", etc. are translated in 25+ languages.
+- **System menus**: Settings, report dialogs, and updater messages follow KOReader's interface language.
+
+If the book's language metadata is not available (e.g. some PDFs), the plugin falls back to English.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a detailed description of the features and changes introduced in each version.
 
 ## What's Next?
 
 I'm calling on you—the community—to help expand this plugin with features that might help others read/study/learn better. A few starters:
-1. The plugin is built around English-to-English dictionary lookups, though supporting other languages in the future might make sense. Making it seamless is the main challenge.
-2. The plugin currently keeps a local log of every dictionary lookup. I'm open to suggestions about what kinds of personalized learning material we can create for the user with that.
+1. The plugin currently keeps a local log of every dictionary lookup. I'm open to suggestions about what kinds of personalized learning material we can create for the user with that.
 
 This plugin wouldn't have been possible without the backbone provided by [AskGPT](https://github.com/drewbaumann/AskGPT)—an excellent plugin that lets you talk to ChatGPT directly from inside KOReader. Open source is awesome!
 

@@ -9,6 +9,9 @@ local json = require("json")
 local lfs = require("libs/libkoreader-lfs")
 local ltn12 = require("ltn12")
 local util = require("util")
+local _ = require("gettext")
+local book_language_ok, book_language = pcall(require, "book_language")
+local T_ = book_language_ok and book_language and book_language.translate_ui or _
 
 local REQUEST_TIMEOUT_SECONDS = 10
 local REPO_OWNER = "SahandMalaei"
@@ -348,17 +351,18 @@ end
 
 function Updater:promptForUpdate(current_version, latest_version, tag_name)
   UIManager:show(ConfirmBox:new {
-    text = "AI Dictionary " .. latest_version .. " is available.\n\nInstalled version: "
-        .. tostring(current_version) .. "\n\nUpdate now?",
-    ok_text = "Update",
+    text = T_("AI Dictionary") .. " " .. latest_version .. " " .. _("is available.") .. "\n\n" ..
+        _("Installed version:") .. " " .. tostring(current_version) .. "\n\n" ..
+        _("Update now?"),
+    ok_text = _("Update"),
     ok_callback = function()
-      show_message("Updating AI Dictionary...", 2)
+      show_message(T_("Updating AI Dictionary..."), 2)
       UIManager:scheduleIn(0.1, function()
         local ok, err = self:updateToTag(tag_name)
         if ok then
           self:showRestartDialog()
         else
-          show_message("AI Dictionary update failed:\n" .. tostring(err), 8)
+          show_message(T_("AI Dictionary update failed:") .. "\n" .. tostring(err), 8)
         end
       end)
     end,
@@ -406,12 +410,12 @@ end
 
 function Updater:showRestartDialog()
   UIManager:show(ButtonDialog:new {
-    title = "AI Dictionary was updated.\n\nPlease quit and restart KOReader to load the new version.",
+    title = T_("AI Dictionary was updated.") .. "\n\n" .. _("Please quit and restart KOReader to load the new version."),
     dismissable = false,
     buttons = {
       {
         {
-          text = "Quit",
+          text = _("Quit"),
           callback = function()
             UIManager:quit()
           end,
